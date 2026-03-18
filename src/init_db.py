@@ -10,54 +10,65 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-def create_tables():
+def create_tables(conn=None):
     commands = (
         """
-        CREATE TABLE IF NOT EXISTS items (
-            itemID SERIAL PRIMARY KEY,
-            name VARCHAR(50) UNIQUE NOT NULL,
-            description VARCHAR(500) NOT NULL,
-            type VARCHAR(50) NOT NULL,
-            material BOOLEAN NOT NULL,
-            statsID INTEGER NOT NULL,
-            sellPrice INTEGER NOT NULL,
-            CONSTRAINT fk_item_recipie
-                FOREIGN KEY(statsID)
-                REFERENCES stats(statID)
-                ON DELETE CASCADE
+        CREATE TABLE Environments (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100),
+            description TEXT
         )
         """,
         """
-        CREATE TABLE IF NOT EXISTS itemsRecipies (
-            itemRecipieID SERIAL PRIMARY KEY,
-            itemID INTEGER NOT NULL,
-            craftingStation VARCHAR(50),
-            CONSTRAINT fk_item_recipie
-                FOREIGN KEY(itemID)
-                REFERENCES items(itemID)
-                ON DELETE CASCADE
+        CREATE TABLE AITypes (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100),
+            description TEXT
         )
         """,
         """
-        CREATE TABLE IF NOT EXISTS recipies (
-            recipieID SERIAL PRIMARY KEY,
-            itemRecipieID INTEGER NOT NULL,
-            itemID INTEGER NOT NULL,
-            amount INTEGER DEFAULT(1),
-            CONSTRAINT fk_item_recipie_link
-                FOREIGN KEY(itemRecipieID)
-                REFERENCES itemsRecipies(itemRecipieID)
-                ON DELETE CASCADE,
-            CONSTRAINT fk_item_ingredient
-                FOREIGN KEY(itemID)
-                REFERENCES items(itemID)
-                ON DELETE CASCADE
+        CREATE TABLE NPCs (
+            id SERIAL PRIMARY KEY,
+            typeID INTEGER
         )
         """,
         """
-        CREATE TABLE IF NOT EXISTS stats (
-            statID SERIAL PRIMARY KEY,
-            itemID INTEGER NOT NULL,
+        CREATE TABLE NPCEnvironments (
+            id SERIAL PRIMARY KEY,
+            npcID INTEGER REFERENCES NPCs(id),
+            environmentID INTEGER REFERENCES Environments(id)
+        )
+        """,
+        """
+        CREATE TABLE EnemyVariants (
+            id SERIAL PRIMARY KEY,
+            npcID INTEGER REFERENCES NPCs(id),
+            AITypeID INTEGER REFERENCES AITypes(id),
+            type VARCHAR(50), -- e.g., Enemy/Critter/TownNPC
+            mode VARCHAR(50)  -- e.g., classic/expert/master
+        )
+        """,
+        """
+        CREATE TABLE EnemyVariantStats (
+            id SERIAL PRIMARY KEY,
+            variantID INTEGER REFERENCES EnemyVariants(id),
+            health INTEGER,
+            damage INTEGER,
+            defense INTEGER,
+            coins INTEGER
+        )
+        """,
+        """
+        CREATE TABLE NPCSounds (
+            id SERIAL PRIMARY KEY,
+            npcID INTEGER REFERENCES NPCs(id),
+            url VARCHAR(255)
+        )
+        """,
+        """
+        CREATE TABLE Stats (
+            id SERIAL PRIMARY KEY,
+            itemID INTEGER NOT NULL, -- Foreign key constraint added later
             damage VARCHAR(20),
             knockback VARCHAR(20),
             criticalChance VARCHAR(20),
@@ -67,27 +78,58 @@ def create_tables():
             tooltip VARCHAR(100),
             defense VARCHAR(20),
             setBonus VARCHAR(100),
-            bodySlot VARCHAR(50),
-            CONSTRAINT fk_item_recipie
-                FOREIGN KEY(itemID)
-                REFERENCES items(itemID)
-                ON DELETE CASCADE
+            bodySlot VARCHAR(50)
         )
         """,
         """
-        CREATE TABLE IF NOT EXISTS enemy (
-            enemyID SERIAL PRIMARY KEY,
-
-            
+        CREATE TABLE Items (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(50) UNIQUE NOT NULL,
+            description VARCHAR(500) NOT NULL,
+            type VARCHAR(50) NOT NULL,
+            material BOOLEAN NOT NULL,
+            statsID INTEGER NOT NULL REFERENCES Stats(id),
+            sellPrice INTEGER NOT NULL
+        )
+        """,
+        """
+        ALTER TABLE Stats 
+        ADD CONSTRAINT fk_stats_item 
+        FOREIGN KEY (itemID) REFERENCES Items(id) DEFERRABLE INITIALLY DEFERRED
+        """,
+        """
+        CREATE TABLE itemsRecipies (
+            id SERIAL PRIMARY KEY,
+            itemID INTEGER NOT NULL REFERENCES Items(id),
+            craftingStation VARCHAR(50)
+        )
+        """,
+        """
+        CREATE TABLE recipies (
+            id SERIAL PRIMARY KEY,
+            itemRecipieID INTEGER NOT NULL REFERENCES itemsRecipies(id),
+            itemID INTEGER NOT NULL REFERENCES Items(id),
+            amount INTEGER DEFAULT 1
+        )
+        """,
+        """
+        CREATE TABLE EnemyDrops (
+            id SERIAL PRIMARY KEY,
+            variantID INTEGER REFERENCES EnemyVariants(id),
+            itemID INTEGER REFERENCES Items(id),
+            rate DECIMAL -- Assumed DECIMAL or FLOAT for drop rate percentage
         )
         """
     )
     
     
-    conn = None
+    own_conn = False
     try:
-        # Połączenie z bazą
-        conn = psycopg2.connect(**DB_CONFIG)
+        if conn is None:
+            # Połączenie z bazą
+            conn = psycopg2.connect(**DB_CONFIG)
+            own_conn = True
+        
         cur = conn.cursor()
         
         # Tworzenie tabel
@@ -102,8 +144,11 @@ def create_tables():
         
     except (Exception, psycopg2.DatabaseError) as error:
         print(f"Błąd: {error}")
-    finally:
         if conn is not None:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn and conn is not None:
             conn.close()
 
 if __name__ == "__main__":

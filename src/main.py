@@ -7,6 +7,8 @@ from mysql.connector import Error as MySQLError
 import psycopg2
 from psycopg2 import OperationalError as PostgresError
 import redis
+
+import init_db
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure as MongoError
 
@@ -123,6 +125,11 @@ def init_mysql(conn):
 
 def init_postgres(conn):
     try:
+        # Run the full schema initialization from init_db.py
+        logging.info("Running init_db schema initialization for PostgreSQL...")
+        init_db.create_tables(conn)
+        
+        # Initialize users_postgres
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users_postgres (
@@ -144,6 +151,7 @@ def init_postgres(conn):
             logging.info("users_postgres table already contains data")
             
         cursor.close()
+        logging.info("PostgreSQL initialization complete.")
     except Exception as e:
         logging.error(f"Error initializing PostgreSQL: {e}")
         conn.rollback()
@@ -179,26 +187,22 @@ def init_mongo(client):
 def main():
     logging.info("Starting database initialization script...")
     
-    # Connect to all databases
     mysql_conn = wait_for_mysql()
     postgres_conn = wait_for_postgres()
     redis_conn = wait_for_redis()
     mongo_client = wait_for_mongo()
     
-    # Initialize structures and data
     init_mysql(mysql_conn)
     init_postgres(postgres_conn)
     init_redis(redis_conn)
     init_mongo(mongo_client)
     
-    # Close connections
     mysql_conn.close()
     postgres_conn.close()
     mongo_client.close()
     
     logging.info("Database initialization completed successfully!")
     
-    # Keep the container running
     while True:
         time.sleep(3600)
 
