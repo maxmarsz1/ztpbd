@@ -13,34 +13,34 @@ DB_CONFIG = {
 def create_tables(conn=None):
     commands = (
         """
-        CREATE TABLE Environments (
+        CREATE TABLE IF NOT EXISTS Environments (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100),
             description TEXT
         )
         """,
         """
-        CREATE TABLE AITypes (
+        CREATE TABLE IF NOT EXISTS AITypes (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100),
             description TEXT
         )
         """,
         """
-        CREATE TABLE NPCs (
+        CREATE TABLE IF NOT EXISTS NPCs (
             id SERIAL PRIMARY KEY,
             typeID INTEGER
         )
         """,
         """
-        CREATE TABLE NPCEnvironments (
+        CREATE TABLE IF NOT EXISTS NPCEnvironments (
             id SERIAL PRIMARY KEY,
             npcID INTEGER REFERENCES NPCs(id),
             environmentID INTEGER REFERENCES Environments(id)
         )
         """,
         """
-        CREATE TABLE EnemyVariants (
+        CREATE TABLE IF NOT EXISTS EnemyVariants (
             id SERIAL PRIMARY KEY,
             npcID INTEGER REFERENCES NPCs(id),
             AITypeID INTEGER REFERENCES AITypes(id),
@@ -49,7 +49,7 @@ def create_tables(conn=None):
         )
         """,
         """
-        CREATE TABLE EnemyVariantStats (
+        CREATE TABLE IF NOT EXISTS EnemyVariantStats (
             id SERIAL PRIMARY KEY,
             variantID INTEGER REFERENCES EnemyVariants(id),
             health INTEGER,
@@ -59,30 +59,30 @@ def create_tables(conn=None):
         )
         """,
         """
-        CREATE TABLE NPCSounds (
+        CREATE TABLE IF NOT EXISTS NPCSounds (
             id SERIAL PRIMARY KEY,
             npcID INTEGER REFERENCES NPCs(id),
             url VARCHAR(255)
         )
         """,
         """
-        CREATE TABLE Stats (
+        CREATE TABLE IF NOT EXISTS Stats (
             id SERIAL PRIMARY KEY,
             itemID INTEGER NOT NULL, -- Foreign key constraint added later
-            damage VARCHAR(20),
-            knockback VARCHAR(20),
-            criticalChance VARCHAR(20),
-            useTime VARCHAR(20),
-            mana VARCHAR(20),
-            velocity VARCHAR(20),
+            damage INTEGER,
+            knockback INTEGER,
+            criticalChance INTEGER,
+            useTime INTEGER,
+            mana INTEGER,
+            velocity INTEGER,
             tooltip VARCHAR(100),
-            defense VARCHAR(20),
+            defense INTEGER,
             setBonus VARCHAR(100),
             bodySlot VARCHAR(50)
         )
         """,
         """
-        CREATE TABLE Items (
+        CREATE TABLE IF NOT EXISTS Items (
             id SERIAL PRIMARY KEY,
             name VARCHAR(50) UNIQUE NOT NULL,
             description VARCHAR(500) NOT NULL,
@@ -93,19 +93,26 @@ def create_tables(conn=None):
         )
         """,
         """
-        ALTER TABLE Stats 
-        ADD CONSTRAINT fk_stats_item 
-        FOREIGN KEY (itemID) REFERENCES Items(id) DEFERRABLE INITIALLY DEFERRED
+        DO $$ 
+        BEGIN 
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM information_schema.table_constraints 
+                WHERE constraint_name = 'fk_stats_item'
+            ) THEN 
+                ALTER TABLE Stats ADD CONSTRAINT fk_stats_item FOREIGN KEY (itemID) REFERENCES Items(id) DEFERRABLE INITIALLY DEFERRED;
+            END IF; 
+        END $$;
         """,
         """
-        CREATE TABLE itemsRecipies (
+        CREATE TABLE IF NOT EXISTS itemsRecipies (
             id SERIAL PRIMARY KEY,
             itemID INTEGER NOT NULL REFERENCES Items(id),
             craftingStation VARCHAR(50)
         )
         """,
         """
-        CREATE TABLE recipies (
+        CREATE TABLE IF NOT EXISTS recipies (
             id SERIAL PRIMARY KEY,
             itemRecipieID INTEGER NOT NULL REFERENCES itemsRecipies(id),
             itemID INTEGER NOT NULL REFERENCES Items(id),
@@ -113,7 +120,7 @@ def create_tables(conn=None):
         )
         """,
         """
-        CREATE TABLE EnemyDrops (
+        CREATE TABLE IF NOT EXISTS EnemyDrops (
             id SERIAL PRIMARY KEY,
             variantID INTEGER REFERENCES EnemyVariants(id),
             itemID INTEGER REFERENCES Items(id),

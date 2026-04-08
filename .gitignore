@@ -1,1 +1,5 @@
 src/__pycache__
+mongodb_data/
+mysql_data/
+postgres_data/
+redis_data/

@@ -9,6 +9,7 @@ from psycopg2 import OperationalError as PostgresError
 import redis
 
 import init_db
+import generate_data
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure as MongoError
 
@@ -197,11 +198,79 @@ def main():
     init_redis(redis_conn)
     init_mongo(mongo_client)
     
+    logging.info("Starting bulk data generation...")
+    start_time = time.time()
+    try:
+        generate_data.run_sync()
+    except Exception as e:
+        logging.error(f"Error during bulk data generation: {e}")
+    end_time = time.time()
+    logging.info(f"Bulk data generation finished in {end_time - start_time:.2f} seconds.")
+
+    logging.info("Verifying row counts across databases...")
+    for table, target_count in generate_data.COUNTS.items():
+        # Postgres
+        try:
+            with postgres_conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                pg_count = cur.fetchone()[0]
+                if pg_count < target_count:
+                    logging.warning(f"Postgres '{table}' count mismatch: found {pg_count}, expected >= {target_count}")
+        except Exception as e:
+            logging.error(f"Postgres verification error on {table}: {e}")
+            postgres_conn.rollback()
+
+        # MySQL
+        try:
+            with mysql_conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                my_count = cur.fetchone()[0]
+                if my_count < target_count:
+                    logging.warning(f"MySQL '{table}' count mismatch: found {my_count}, expected >= {target_count}")
+        except Exception as e:
+            logging.error(f"MySQL verification error on {table}: {e}")
+
+        # Mongo
+        try:
+            mongo_count = mongo_client['mydatabase'][table].count_documents({})
+            if mongo_count < target_count:
+                logging.warning(f"Mongo '{table}' count mismatch: found {mongo_count}, expected >= {target_count}")
+        except Exception as e:
+            logging.error(f"Mongo verification error on {table}: {e}")
+
+    # Redis Verification (Global count instead of keys * per table to save memory)
+    try:
+        redis_size = redis_conn.dbsize()
+        expected_redis_size = sum(generate_data.COUNTS.values())
+        if redis_size < expected_redis_size:
+            logging.warning(f"Redis TOTAL size mismatch: found {redis_size}, expected >= {expected_redis_size}")
+    except Exception as e:
+        logging.error(f"Redis size check error: {e}")
+
+    logging.info("Verification complete.")
+
+    logging.info("Flushing and saving all databases to disk to ensure durability...")
+    
+    # 2. Redis memory to disk dump
+    try:
+        redis_conn.bgsave()
+        logging.info("- Redis triggered BGSAVE (saving to dump.rdb).")
+    except Exception as e:
+        # Prevent throwing if a bgsave is already in progress
+        logging.warning(f"- Redis bgsave note: {e}")
+
+    # 3. Mongo memory to disk flush
+    try:
+        mongo_client.admin.command('fsync')
+        logging.info("- MongoDB data forcefully synced (fsync) to disk.")
+    except Exception as e:
+        logging.warning(f"- Mongo fsync note: {e}")
+
     mysql_conn.close()
     postgres_conn.close()
     mongo_client.close()
     
-    logging.info("Database initialization completed successfully!")
+    logging.info("Database initialization and synchronization completed successfully!")
     
     while True:
         time.sleep(3600)
