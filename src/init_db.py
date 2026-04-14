@@ -1,8 +1,9 @@
 import psycopg2
+import mysql.connector
 from psycopg2 import sql
 
 # Konfiguracja połączenia (zgodna z docker-compose.yml)
-DB_CONFIG = {
+DB_CONFIG_PG = {
     "dbname": "mydatabase",
     "user": "user",
     "password": "password",
@@ -10,8 +11,16 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-def create_tables(conn=None):
-    commands = (
+DB_CONFIG_MYSQL = {
+    "database": "mydatabase",
+    "user": "user",
+    "password": "password",
+    "host": "localhost",
+    "port": "3306"
+}
+
+def create_tables(pg_conn=None, mysql_conn=None):
+    commands_pg = (
         """
         CREATE TABLE IF NOT EXISTS Environments (
             id SERIAL PRIMARY KEY,
@@ -129,34 +138,70 @@ def create_tables(conn=None):
         """
     )
     
+    commands_mysql = [c.replace("SERIAL PRIMARY KEY", "INT AUTO_INCREMENT PRIMARY KEY").replace("TEXT", "LONGTEXT").replace("VARCHAR", "VARCHAR").replace("DECIMAL", "DECIMAL(10,4)").replace("BOOLEAN", "BOOLEAN") for c in commands_pg if not c.strip().startswith("DO $$")]
+    # Remove Postgres specific block
     
-    own_conn = False
+    # We will build constraints differently or just depend on the simple tables for MySQL.
+
+    own_pg_conn = False
     try:
-        if conn is None:
-            # Połączenie z bazą
-            conn = psycopg2.connect(**DB_CONFIG)
-            own_conn = True
+        if pg_conn is None:
+            # Połączenie z bazą PG
+            pg_conn = psycopg2.connect(**DB_CONFIG_PG)
+            own_pg_conn = True
         
-        cur = conn.cursor()
+        cur = pg_conn.cursor()
         
-        # Tworzenie tabel
-        print("Tworzenie tabel i relacji...")
-        for command in commands:
+        # Tworzenie tabel PG
+        print("Tworzenie tabel i relacji w PostgreSQL...")
+        for command in commands_pg:
             cur.execute(command)
         
         # Zatwierdzenie zmian
-        conn.commit()
+        pg_conn.commit()
         cur.close()
-        print("Sukces! Tabele zostały utworzone.")
+        print("Sukces! Tabele zostały utworzone w PostgreSQL.")
         
     except (Exception, psycopg2.DatabaseError) as error:
-        print(f"Błąd: {error}")
-        if conn is not None:
-            conn.rollback()
-        raise
+        print(f"Błąd PostgreSQL: {error}")
+        if pg_conn is not None:
+            pg_conn.rollback()
     finally:
-        if own_conn and conn is not None:
-            conn.close()
+        if own_pg_conn and pg_conn is not None:
+            pg_conn.close()
+
+    own_mysql_conn = False
+    try:
+        if mysql_conn is None:
+            # Połączenie z bazą MySQL
+            mysql_conn = mysql.connector.connect(**DB_CONFIG_MYSQL)
+            own_mysql_conn = True
+        
+        cur = mysql_conn.cursor()
+        
+        # Tworzenie tabel MySQL
+        print("Tworzenie tabel i relacji w MySQL...")
+        for command in commands_mysql:
+            # MySQL syntax cleanup
+            cmd = command.replace("DEFERRABLE INITIALLY DEFERRED", "")
+            cur.execute(cmd)
+        
+        # Odrębne ograniczenie klucza obcego dla MySQL, bo DO $$ nie działa
+        try:
+            cur.execute("ALTER TABLE Stats ADD CONSTRAINT fk_stats_item FOREIGN KEY (itemID) REFERENCES Items(id);")
+        except mysql.connector.Error:
+            pass # Already exists or we handle it gracefully
+
+        mysql_conn.commit()
+        cur.close()
+        print("Sukces! Tabele zostały utworzone w MySQL.")
+
+    except mysql.connector.Error as error:
+        print(f"Błąd MySQL: {error}")
+    finally:
+        if own_mysql_conn and mysql_conn is not None:
+            if mysql_conn.is_connected():
+                mysql_conn.close()
 
 if __name__ == "__main__":
     create_tables()

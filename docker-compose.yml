@@ -36,21 +36,6 @@ services:
       - ./redis_data:/data
     command: redis-server --requirepass password
 
-  app:
-    image: python:3.11-slim
-    container_name: python_app
-    restart: always
-    environment:
-      PYTHONUNBUFFERED: 1
-    working_dir: /app
-    volumes:
-      - ./src:/app
-    depends_on:
-      - mysql
-      - postgres
-      - redis
-      - mongodb
-    command: sh -c "pip install -r requirements.txt && python main.py"
   mongodb:
     image: mongo:latest
     container_name: mongodb
@@ -62,7 +47,6 @@ services:
       - "27017:27017"
     volumes:
       - ./mongodb_data:/data/db
-
   # pgadmin:
   #   image: dpage/pgadmin4
   #   container_name: pgadmin

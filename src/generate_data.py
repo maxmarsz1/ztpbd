@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import random
+import argparse
 from faker import Faker
 import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,9 +17,22 @@ from pymongo import MongoClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CHUNK_SIZE = 50000
+PROFILES = {
+    'maly': {
+        'COUNT_MULTIPLIER': 0.01,
+        'CHUNK_SIZE': 2000
+    },
+    'sredni': {
+        'COUNT_MULTIPLIER': 0.1,
+        'CHUNK_SIZE': 20000
+    },
+    'duzy': {
+        'COUNT_MULTIPLIER': 10.0,
+        'CHUNK_SIZE': 50000
+    }
+}
 
-COUNTS = {
+BASE_COUNTS = {
     'Environments': 100,
     'AITypes': 100,
     'NPCs': 1000000,
@@ -44,26 +58,26 @@ POOL_CRAFT = ["Work Bench", "Furnace", "Anvil", "Loom", "Sawmill", "Tinker's Wor
 def get_db_configs():
     return {
         'mysql': {
-            'host': os.environ.get('MYSQL_HOST', 'mysql'),
+            'host': os.environ.get('MYSQL_HOST', 'localhost'),
             'user': os.environ.get('MYSQL_USER', 'user'),
             'password': os.environ.get('MYSQL_PASSWORD', 'password'),
             'database': os.environ.get('MYSQL_DATABASE', 'mydatabase'),
             'port': int(os.environ.get('MYSQL_PORT', 3306))
         },
         'postgres': {
-            'host': os.environ.get('POSTGRES_HOST', 'postgres'),
+            'host': os.environ.get('POSTGRES_HOST', 'localhost'),
             'user': os.environ.get('POSTGRES_USER', 'user'),
             'password': os.environ.get('POSTGRES_PASSWORD', 'password'),
             'dbname': os.environ.get('POSTGRES_DB', 'mydatabase'),
             'port': int(os.environ.get('POSTGRES_PORT', 5432))
         },
         'redis': {
-            'host': os.environ.get('REDIS_HOST', 'redis'),
+            'host': os.environ.get('REDIS_HOST', 'localhost'),
             'password': os.environ.get('REDIS_PASSWORD', 'password'),
             'port': int(os.environ.get('REDIS_PORT', 6379))
         },
         'mongo': {
-            'host': os.environ.get('MONGO_HOST', 'mongodb'),
+            'host': os.environ.get('MONGO_HOST', 'localhost'),
             'user': os.environ.get('MONGO_USER', 'user'),
             'password': os.environ.get('MONGO_PASSWORD', 'password'),
             'port': int(os.environ.get('MONGO_PORT', 27017))
@@ -205,9 +219,21 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
         except Exception as e:
             logging.error(f"Batch insert error Mongo on {table}: {e}")
 
-def run_sync():
+def run_sync(profile='maly'):
     cfg = get_db_configs()
     my_pool, pg_pool, redis_client, mongo_client = None, None, None, None
+    
+    prof_data = PROFILES[profile]
+    multiplier = prof_data['COUNT_MULTIPLIER']
+    CHUNK_SIZE = prof_data['CHUNK_SIZE']
+    
+    global COUNTS
+    COUNTS = {k: max(1, int(v * multiplier)) for k, v in BASE_COUNTS.items()}
+    # Dictionary tables need to have at least a few records independently of the multiplier
+    COUNTS['Environments'] = max(10, int(BASE_COUNTS['Environments'] * multiplier))
+    COUNTS['AITypes'] = max(10, int(BASE_COUNTS['AITypes'] * multiplier))
+    
+    logging.info(f"Running generation with profile '{profile}', MULTIPLIER={multiplier}, CHUNK_SIZE={CHUNK_SIZE}")
     
     # Init Connections
     try:
@@ -295,7 +321,7 @@ def run_sync():
         global_start = (global_start // CHUNK_SIZE) * CHUNK_SIZE
 
         if global_start >= target_count:
-            logging.info(f"Skipping {table} - thoroughly populated across all active DBs.")
+            logging.info(f"Skipping {table} - thoroughly populated across all active DBs (up to {target_count}).")
             continue
             
         if global_start > 0:
@@ -330,4 +356,8 @@ def run_sync():
     if redis_client: redis_client.close()
 
 if __name__ == '__main__':
-    run_sync()
+    parser = argparse.ArgumentParser(description="Multi-Database Data Generator")
+    parser.add_argument('--profile', type=str, choices=['maly', 'sredni', 'duzy'], default='maly', help="Profil wydajnosciowy: maly (10k), sredni (100k), duzy (10M)")
+    args = parser.parse_args()
+    
+    run_sync(args.profile)

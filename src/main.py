@@ -16,12 +16,12 @@ from pymongo.errors import ConnectionFailure as MongoError
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def wait_for_mysql():
-    host = os.environ.get('MYSQL_HOST', 'mysql')
+    host = os.environ.get('MYSQL_HOST', 'localhost')
     user = os.environ.get('MYSQL_USER', 'user')
     password = os.environ.get('MYSQL_PASSWORD', 'password')
     database = os.environ.get('MYSQL_DATABASE', 'mydatabase')
     
-    retries = 30
+    retries = 150
     while retries > 0:
         try:
             conn = mysql.connector.connect(
@@ -40,12 +40,12 @@ def wait_for_mysql():
     raise Exception("Could not connect to MySQL after multiple retries")
 
 def wait_for_postgres():
-    host = os.environ.get('POSTGRES_HOST', 'postgres')
+    host = os.environ.get('POSTGRES_HOST', 'localhost')
     user = os.environ.get('POSTGRES_USER', 'user')
     password = os.environ.get('POSTGRES_PASSWORD', 'password')
     database = os.environ.get('POSTGRES_DB', 'mydatabase')
 
-    retries = 30
+    retries = 150
     while retries > 0:
         try:
             conn = psycopg2.connect(
@@ -63,10 +63,10 @@ def wait_for_postgres():
     raise Exception("Could not connect to PostgreSQL after multiple retries")
 
 def wait_for_redis():
-    host = os.environ.get('REDIS_HOST', 'redis')
+    host = os.environ.get('REDIS_HOST', 'localhost')
     password = os.environ.get('REDIS_PASSWORD', 'password')
     
-    retries = 30
+    retries = 150
     while retries > 0:
         try:
             r = redis.Redis(host=host, port=6379, password=password, db=0, decode_responses=True)
@@ -80,12 +80,12 @@ def wait_for_redis():
     raise Exception("Could not connect to Redis after multiple retries")
 
 def wait_for_mongo():
-    host = os.environ.get('MONGO_HOST', 'mongodb')
+    host = os.environ.get('MONGO_HOST', 'localhost')
     user = os.environ.get('MONGO_USER', 'user')
     password = os.environ.get('MONGO_PASSWORD', 'password')
     
     uri = f"mongodb://{user}:{password}@{host}:27017/"
-    retries = 30
+    retries = 150
     while retries > 0:
         try:
             client = MongoClient(uri, serverSelectionTimeoutMS=2000)
@@ -124,11 +124,11 @@ def init_mysql(conn):
     except Exception as e:
         logging.error(f"Error initializing MySQL: {e}")
 
-def init_postgres(conn):
+def init_postgres_and_mysql_schemas(pg_conn, mysql_conn):
     try:
-        # Run the full schema initialization from init_db.py
-        logging.info("Running init_db schema initialization for PostgreSQL...")
-        init_db.create_tables(conn)
+        # Run the full schema initialization from init_db.py for both PG and MySQL
+        logging.info("Running init_db schema initialization for PostgreSQL and MySQL...")
+        init_db.create_tables(pg_conn, mysql_conn)
         
         # Initialize users_postgres
         cursor = conn.cursor()
@@ -194,14 +194,36 @@ def main():
     mongo_client = wait_for_mongo()
     
     init_mysql(mysql_conn)
-    init_postgres(postgres_conn)
+    init_postgres_and_mysql_schemas(postgres_conn, mysql_conn)
+    
+    # Initialize users_postgres manually
+    try:
+        cursor = postgres_conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users_postgres (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) NOT NULL,
+                email VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("SELECT COUNT(*) FROM users_postgres")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO users_postgres (username, email) VALUES (%s, %s)", ('postgres_user', 'user@postgres.local'))
+            postgres_conn.commit()
+        cursor.close()
+    except Exception as e:
+        logging.error(f"Error initializing users_postgres: {e}")
+        postgres_conn.rollback()
+
     init_redis(redis_conn)
     init_mongo(mongo_client)
     
-    logging.info("Starting bulk data generation...")
+    profile = os.environ.get('PROFILE', 'maly')
+    logging.info(f"Starting bulk data generation with profile: {profile}...")
     start_time = time.time()
     try:
-        generate_data.run_sync()
+        generate_data.run_sync(profile)
     except Exception as e:
         logging.error(f"Error during bulk data generation: {e}")
     end_time = time.time()
