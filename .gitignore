@@ -5,3 +5,6 @@ postgres_data/
 redis_data/
 __pycache__/
 .venv/
+wykresy_*/
+benchmark_results_*
+benchmark_explain_*

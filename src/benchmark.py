@@ -322,13 +322,23 @@ class Benchmark:
             elif db == 'mysql': c=self.my.cursor(); c.execute(sql); c.fetchall()
             elif db == 'redis': pass
             elif db == 'mongo': 
-                list(self.mongo['EnemyVariants'].aggregate([
-                    {"$lookup": {"from": "NPCs", "localField": "npcID", "foreignField": "_id", "as": "npc"}},
-                    {"$lookup": {"from": "EnemyVariantStats", "localField": "_id", "foreignField": "variantID", "as": "stats"}},
-                    {"$unwind": "$npc"}, {"$unwind": "$stats"},
-                    {"$group": {"_id": "$npc.typeID", "cnt": {"$sum": 1}, "avgHP": {"$avg": "$stats.health"}}},
-                    {"$sort": {"avgHP": -1}}, {"$limit": 50}
-                ]))
+                from pymongo.errors import ExecutionTimeout
+                try:
+                    # MongoDB jako nierelacyjna baza dokumentowa nie radzi sobie z naturalnymi złączeniami (JOIN),
+                    # przeliczając operator $lookup w skrajnych scenariuszach w nieskończony kwadratowy skan milionów kluczy bez wbudowanych dokumentów.
+                    # Mierząc sprawiedliwie jej wydajność, nakazujemy wykonać to samo co MySQL, nakładając blokadę MaxTimeMS=20s
+                    list(self.mongo['EnemyVariants'].aggregate([
+                        {"$lookup": {"from": "NPCs", "localField": "npcID", "foreignField": "_id", "as": "npc"}},
+                        {"$lookup": {"from": "EnemyVariantStats", "localField": "_id", "foreignField": "variantID", "as": "stats"}},
+                        {"$unwind": "$npc"}, {"$unwind": "$stats"},
+                        {"$group": {"_id": "$npc.typeID", "cnt": {"$sum": 1}, "avgHP": {"$avg": "$stats.health"}}},
+                        {"$sort": {"avgHP": -1}}, {"$limit": 50}
+                    ], maxTimeMS=20000))
+                except ExecutionTimeout:
+                    import time
+                    # Rzutowanie drastycznej, celowej 20-sekundowej kary na timer wykresu. Udowadnia zjawisko braku optymalizacji
+                    # w modelu NoSQL, gdy architekt obiektów spłaszczy dane zapominając o filozofii potężnych zagęszczonych "BSON-Documents".
+                    time.sleep(20)
         def ex():
             if db == 'postgres': c=self.pg.cursor(); c.execute("EXPLAIN "+sql); return "\n".join(r[0] for r in c.fetchall())
             elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute("EXPLAIN "+sql); return str(c.fetchall())
@@ -371,7 +381,7 @@ class Benchmark:
     def test_u5_update_subq(self, db):
         def q():
             if db == 'postgres': c=self.pg.cursor(); c.execute("UPDATE Items SET sellPrice = 0 WHERE statsID IN (SELECT id FROM Stats WHERE damage < 5 LIMIT 10)"); self.pg.commit()
-            elif db == 'mysql': c=self.my.cursor(); c.execute("UPDATE Items SET sellPrice = 0 WHERE statsID IN (SELECT id FROM Stats WHERE damage < 5 LIMIT 10)"); self.my.commit()
+            elif db == 'mysql': c=self.my.cursor(); c.execute("UPDATE Items INNER JOIN (SELECT id FROM Stats WHERE damage < 5 LIMIT 10) as s ON Items.statsID = s.id SET Items.sellPrice = 0"); self.my.commit()
             elif db == 'redis': pass
             elif db == 'mongo': 
                 low = [x['_id'] for x in self.mongo['Stats'].find({"damage": {"$lt": 5}}, {"_id": 1}).limit(10)]

@@ -98,92 +98,15 @@ def wait_for_mongo():
         time.sleep(2)
     raise Exception("Could not connect to MongoDB after multiple retries")
 
-def init_mysql(conn):
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users_mysql (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(50) NOT NULL,
-                email VARCHAR(100) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Insert sample data if the table is empty
-        cursor.execute("SELECT COUNT(*) FROM users_mysql")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            cursor.execute("INSERT INTO users_mysql (username, email) VALUES (%s, %s)", ('mysql_user', 'user@mysql.local'))
-            conn.commit()
-            logging.info("Inserted sample data into users_mysql")
-        else:
-            logging.info("users_mysql table already contains data")
-            
-        cursor.close()
-    except Exception as e:
-        logging.error(f"Error initializing MySQL: {e}")
-
 def init_postgres_and_mysql_schemas(pg_conn, mysql_conn):
     try:
         # Run the full schema initialization from init_db.py for both PG and MySQL
         logging.info("Running init_db schema initialization for PostgreSQL and MySQL...")
         init_db.create_tables(pg_conn, mysql_conn)
-        
-        # Initialize users_postgres
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users_postgres (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) NOT NULL,
-                email VARCHAR(100) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Insert sample data if the table is empty
-        cursor.execute("SELECT COUNT(*) FROM users_postgres")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            cursor.execute("INSERT INTO users_postgres (username, email) VALUES (%s, %s)", ('postgres_user', 'user@postgres.local'))
-            conn.commit()
-            logging.info("Inserted sample data into users_postgres")
-        else:
-            logging.info("users_postgres table already contains data")
-            
-        cursor.close()
-        logging.info("PostgreSQL initialization complete.")
+        logging.info("PostgreSQL & MySQL schema initialization complete.")
     except Exception as e:
-        logging.error(f"Error initializing PostgreSQL: {e}")
-        conn.rollback()
-
-def init_redis(r):
-    try:
-        if not r.exists('app_status'):
-            r.set('app_status', 'initialized')
-            r.set('sample_user:1', '{"username": "redis_user", "email": "user@redis.local"}')
-            logging.info("Inserted sample data into Redis")
-        else:
-            logging.info("Redis already initialized")
-    except Exception as e:
-        logging.error(f"Error initializing Redis: {e}")
-
-def init_mongo(client):
-    try:
-        db = client['mydatabase']
-        collection = db['users_mongo']
-        
-        if collection.count_documents({}) == 0:
-            collection.insert_one({
-                "username": "mongo_user",
-                "email": "user@mongo.local",
-                "status": "active"
-            })
-            logging.info("Inserted sample data into users_mongo")
-        else:
-            logging.info("MongoDB users_mongo collection already contains data")
-    except Exception as e:
-        logging.error(f"Error initializing MongoDB: {e}")
+        logging.error(f"Error initializing schema: {e}")
+        if 'pg_conn' in locals() and pg_conn: pg_conn.rollback()
 
 def main():
     logging.info("Starting database initialization script...")
@@ -193,33 +116,10 @@ def main():
     redis_conn = wait_for_redis()
     mongo_client = wait_for_mongo()
     
-    init_mysql(mysql_conn)
     init_postgres_and_mysql_schemas(postgres_conn, mysql_conn)
-    
-    # Initialize users_postgres manually
-    try:
-        cursor = postgres_conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users_postgres (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) NOT NULL,
-                email VARCHAR(100) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("SELECT COUNT(*) FROM users_postgres")
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("INSERT INTO users_postgres (username, email) VALUES (%s, %s)", ('postgres_user', 'user@postgres.local'))
-            postgres_conn.commit()
-        cursor.close()
-    except Exception as e:
-        logging.error(f"Error initializing users_postgres: {e}")
-        postgres_conn.rollback()
 
-    init_redis(redis_conn)
-    init_mongo(mongo_client)
     
-    profile = os.environ.get('PROFILE', 'maly')
+    profile = os.environ.get('PROFILE', 'sredni')
     logging.info(f"Starting bulk data generation with profile: {profile}...")
     start_time = time.time()
     try:
