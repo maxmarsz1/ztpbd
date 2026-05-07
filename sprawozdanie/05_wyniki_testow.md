@@ -2,17 +2,23 @@
 
 Zautomatyzowane testy z puli 24 ustrukturyzowanych skryptów na potężnych modelach badawczych udowodniły kilka interesujących zależności. Pomiary uśrednione z 3 transakcji (na każdy scenariusz w każdej z baz) można poddać weryfikacji. 
 
-## 7.1 Obserwacje dla modelu CREATE (Wstawianie)
-1. **Pojedynczy rekord**: System klucz-wartość taki jak Redis i architektury dokumentowe w Mongo górują gigantyczną szybkością powołania. Zwykłe zapisy zajmują promil setnych sekund – bazy relacyjne typu Postgres/MySQL muszą podeprzeć operacje walidacją integralności typów, sprawa pogarsza się gdy występuje dużo ograniczeń (Constraints).  
-2. **Batch / Bulk Insert**: Optymalizacja w `execute_values`/`executemany` w środowiskac MySQL/PG znacznie zbliżyła rzędy operacji silników ze sobą. Potężne importy w MongoDB (insert_many) radzą sobie fenomenalnie nie mając balastu transakcyjnego podłoża.  
-3. **Upserty/Konflikty**: Specyficzne, trudne do operacji zapisy korzystające z klauzuli `ON DUPLICATE/ON CONFLICT` wymagały minimalnie widocznie więcej czasu dla logiki serwerów relacyjnych.
+## 7.1 Analiza wyników testów wydajnościowych (Kategoria C – Wstawianie)
+**Wnioski z wykresów (`wykres_C.png`):**
+W operacjach pojedynczego wstawiania (C1) oraz paczkowych (C2, C3) dominującą prędkością wykazuje się **Redis**, co wynika bezpośrednio z jego natury – przechowywania i operowania na danych w pamięci RAM (in-memory). **MongoDB** radzi sobie znakomicie ze wstawianiem obszernych, głęboko zagnieżdżonych struktur (scenariusz C6), ponieważ operacja ta wymaga zapisania pojedynczego dokumentu BSON. W bazach relacyjnych (**PostgreSQL**, **MySQL**) głębokie wstawianie wymaga wykonania serii powiązanych instrukcji `INSERT` z dbałością o klucze obce, co generuje większy narzut czasowy. Wykresy "Z indeksami" wyraźnie pokazują również klasyczne zjawisko występujące w bazach danych – narzut indeksowania. Bazy MySQL i Postgres notują niewielki spadek wydajności zapisu, ponieważ każda operacja `INSERT` wymaga teraz dodatkowej aktualizacji struktury drzewiastej (B-Tree) samego indeksu. Zyskują one jednak na maksymalnym bezpieczeństwie danych i zachowaniu własności ACID.
 
-## 7.2 Obserwacje dla modelu READ (Odczytywanie)
-1. **Proste zapytania i zagnieżdżenia**: Odczyty poprzez klucz główny (PK) niemal pokrywają się wydajnościowo pośród wszystkich silników testowych - uogólniając ich zastosowanie. Wprowadzając jednak skomplikowane odczyty wymagające filtracji danych tekstowych (np. `LIKE`), MySQL radził skrajnymi nie raz opóźnieniami w stosunku do rewelacyjnie operującego zapytania typu "Aggregata/Find" w Mongo.  
-2. **Użycie JOIN (Relacje vs BSON)**: W typowej grupie "Złóż obiekt na podstwie relacji C z tabel A i B", wygrywa bezapelacyjnie PostgreSQL. Bazy NoSQL jak MongoDB musiały wspierać się funkcją operacji `$lookup`, która wymaga obciążenia, co jest anty-wzorcem nierelacyjnym - dla nich obiekt powinien być zagnieżdżony bezpośrednio aby zachował skalowalność odczytu. Główne operacje agregujące potwierdzają przewagę RDBMS pod kątem skomplikowanej analityki systemowej gier.
+## 7.2 Analiza wyników testów wydajnościowych (Kategoria R – Odczyt)
+**Wnioski z wykresów (`wykres_R.png`):**
+Odczyt to kategoria, która najlepiej uwydatnia architektoniczną siłę poszczególnych rozwiązań. Odczyty bezpośrednie po kluczu głównym (R1) są błyskawiczne i skalują się znakomicie w każdym z silników. 
+Prawdziwe różnice widać przy złożonym zapytaniu (R6_ComplexQuery). Złączenie trzech tabel ze zliczaniem, wyliczaniem średniej i sortowaniem wykonuje się w silnikach **PostgreSQL** i **MySQL** w ułamku sekundy, dzięki wysoce zoptymalizowanym silnikom przetwarzania zapytań relacyjnych (Query Planners). Z kolei **MongoDB**, jako nierelacyjna baza dokumentowa, drastycznie przegrywa w tym scenariuszu (osiągając kary rzędu dziesiątek/setek sekund). Operatory takie jak `$lookup` dla relacji wirtualnych okazują się niezwykle kosztowne, jeśli dokumenty nie zostały na etapie projektowania osadzone (embedded) bezpośrednio w sobie. Po włączeniu indeksów czas wyszukiwania zakresowego (R3) oraz agregacji (R4) zauważalnie skraca się dla baz relacyjnych.
 
-## 7.3 Wyniki dla UPDATE i DELETE
-1. Masowe usuwanie i przycinanie tysięcy danych w Redisie wykazywało opóźnienia I/O po zablokowaniu jego jedynego wątku operującego obróbką pamięciową setów. W wypadku masowego usuwania za pomocą kryteriów, bazy relacyjne wykazywały pewne nieoczekiwane luki na logowanie trwansej transakcji usunięcia (w przeciwieństwie do operacji wyczyszczenia szybkiego poprzez potężny mechanizm `TRUNCATE`).
+## 7.3 Analiza wyników testów wydajnościowych (Kategoria U – Aktualizacja)
+**Wnioski z wykresów (`wykres_U.png`):**
+Aktualizowanie pojedynczych rekordów, takich jak inkrementacja zmiennej (U1), wypada znakomicie w rozwiązaniach NoSQL. **Redis** (z poleceniem `HINCRBY`) i **MongoDB** (z operatorem `$inc`) rozwiązują ten problem błyskawicznie.
+Jednakże przy masowych aktualizacjach warunkowych (np. opartych na podzapytaniach w U5 lub na wielowarunkowych aktualizacjach używających operatora `CASE WHEN` w U6), relacyjne silniki bezbłędnie pokazują swoją przewagę. Wykresy "Z indeksami" potrafią ukazać zauważalne przyspieszenie dla operacji typu (U3), gdzie wskazane indeksy pomagają silnikowi bazy danych błyskawicznie zlokalizować wiersze przeznaczone do aktualizacji, minimalizując tzw. *Table Scan*.
+
+## 7.4 Analiza wyników testów wydajnościowych (Kategoria D – Usuwanie)
+**Wnioski z wykresów (`wykres_D.png`):**
+Usuwanie płytkie, oparte na znajomości dokładnego klucza (D1), wykonuje się natychmiastowo we wszystkich czterech bazach. W bazach relacyjnych złożone usunięcia kaskadowe lub usuwanie na podstawie złączeń podzapytań (D4) są realizowane pewnie i bez utraty spójności referencyjnej, choć dla gigantycznych porcji danych standardowa instrukcja `DELETE` ulega spowolnieniu ze względu na mechanizmy zabezpieczające transakcje (np. logi WAL w PostgreSQL). Ekstremalny scenariusz czyszczenia bazy (D6) uwidacznia siłę instrukcji DDL typu `TRUNCATE` w bazach SQL, która fizycznie zwalnia obszar danych zwalniając nas z analizy wiersz po wierszu, dzięki czemu operacja jest tak samo natychmiastowa jak zrzucenie kolekcji (`drop()`) w środowisku MongoDB.
 
 ## 8. Wnioski 
 Zaprojektowany system rzetelnie odwzorował wady i zalety różnych koncepcji badanych SZBD: 
