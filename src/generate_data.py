@@ -47,6 +47,8 @@ BASE_COUNTS = {
     'EnemyDrops': 1000000
 }
 
+COUNTS = BASE_COUNTS.copy()
+
 fake = Faker()
 
 print("Pre-generating Faker pools for realistic data...")
@@ -228,7 +230,7 @@ def run_sync(profile='maly'):
     CHUNK_SIZE = prof_data['CHUNK_SIZE']
     
     global COUNTS
-    COUNTS = {k: max(1, int(v * multiplier)) for k, v in BASE_COUNTS.items()}
+    COUNTS.update({k: max(1, int(v * multiplier)) for k, v in BASE_COUNTS.items()})
     # Dictionary tables need to have at least a few records independently of the multiplier
     COUNTS['Environments'] = max(10, int(BASE_COUNTS['Environments'] * multiplier))
     COUNTS['AITypes'] = max(10, int(BASE_COUNTS['AITypes'] * multiplier))
