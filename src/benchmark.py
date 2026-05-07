@@ -82,13 +82,31 @@ class Benchmark:
         self.explains = []
 
     def _measure(self, db_name, query_func, explain_func=None):
+        import concurrent.futures
+        
+        def run_with_timeout(func, timeout_sec):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func)
+                return future.result(timeout=timeout_sec)
+
         start = time.time()
-        query_func()
+        try:
+            run_with_timeout(query_func, 20.0)
+        except concurrent.futures.TimeoutError:
+            logging.warning(f"TIMEOUT: {db_name} query exceeded 20s.")
+            return 20.0, "TIMEOUT (EXPLAIN SKIPPED)"
+            
         t = time.time() - start
+        
         explain = None
         if explain_func and db_name in ['postgres', 'mysql', 'mongo']:
-            try: explain = explain_func()
-            except: explain = "EXPLAIN FAILED"
+            try:
+                explain = run_with_timeout(explain_func, 10.0)
+            except concurrent.futures.TimeoutError:
+                explain = "EXPLAIN TIMEOUT"
+            except:
+                explain = "EXPLAIN FAILED"
+                
         return t, explain
 
     def run_tests(self, prefix):
@@ -322,23 +340,15 @@ class Benchmark:
             elif db == 'mysql': c=self.my.cursor(); c.execute(sql); c.fetchall()
             elif db == 'redis': pass
             elif db == 'mongo': 
-                from pymongo.errors import ExecutionTimeout
-                try:
-                    # MongoDB jako nierelacyjna baza dokumentowa nie radzi sobie z naturalnymi złączeniami (JOIN),
-                    # przeliczając operator $lookup w skrajnych scenariuszach w nieskończony kwadratowy skan milionów kluczy bez wbudowanych dokumentów.
-                    # Mierząc sprawiedliwie jej wydajność, nakazujemy wykonać to samo co MySQL, nakładając blokadę MaxTimeMS=20s
-                    list(self.mongo['EnemyVariants'].aggregate([
-                        {"$lookup": {"from": "NPCs", "localField": "npcID", "foreignField": "_id", "as": "npc"}},
-                        {"$lookup": {"from": "EnemyVariantStats", "localField": "_id", "foreignField": "variantID", "as": "stats"}},
-                        {"$unwind": "$npc"}, {"$unwind": "$stats"},
-                        {"$group": {"_id": "$npc.typeID", "cnt": {"$sum": 1}, "avgHP": {"$avg": "$stats.health"}}},
-                        {"$sort": {"avgHP": -1}}, {"$limit": 50}
-                    ], maxTimeMS=20000))
-                except ExecutionTimeout:
-                    import time
-                    # Rzutowanie drastycznej, celowej 20-sekundowej kary na timer wykresu. Udowadnia zjawisko braku optymalizacji
-                    # w modelu NoSQL, gdy architekt obiektów spłaszczy dane zapominając o filozofii potężnych zagęszczonych "BSON-Documents".
-                    time.sleep(20)
+                # MongoDB jako nierelacyjna baza dokumentowa nie radzi sobie z naturalnymi złączeniami (JOIN).
+                # _measure automatycznie narzuci twardy 20-sekundowy limit i przerwie operację w razie zawieszenia.
+                list(self.mongo['EnemyVariants'].aggregate([
+                    {"$lookup": {"from": "NPCs", "localField": "npcID", "foreignField": "_id", "as": "npc"}},
+                    {"$lookup": {"from": "EnemyVariantStats", "localField": "_id", "foreignField": "variantID", "as": "stats"}},
+                    {"$unwind": "$npc"}, {"$unwind": "$stats"},
+                    {"$group": {"_id": "$npc.typeID", "cnt": {"$sum": 1}, "avgHP": {"$avg": "$stats.health"}}},
+                    {"$sort": {"avgHP": -1}}, {"$limit": 50}
+                ], maxTimeMS=20000))
         def ex():
             if db == 'postgres': c=self.pg.cursor(); c.execute("EXPLAIN "+sql); return "\n".join(r[0] for r in c.fetchall())
             elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute("EXPLAIN "+sql); return str(c.fetchall())
