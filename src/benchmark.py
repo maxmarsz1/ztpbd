@@ -144,6 +144,7 @@ class Benchmark:
             for db in ['postgres', 'mysql', 'redis', 'mongo']:
                 times = []
                 last_expl = None
+                # TRZY PRÓBY DLA KAŻDEGO SCENARIUSZA
                 for _ in range(3):
                     try:
                         t, expl = s_func(db)

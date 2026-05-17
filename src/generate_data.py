@@ -293,7 +293,7 @@ def run_sync(profile='maly'):
             try:
                 conn = my_pool.get_connection()
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
+                    cur.execute(f"SELECT COUNT(id) FROM {table}")
                     active_maxes.append(cur.fetchone()[0])
                 conn.close()
             except: pass
@@ -301,21 +301,21 @@ def run_sync(profile='maly'):
             try:
                 conn = pg_pool.getconn()
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
+                    cur.execute(f"SELECT COUNT(id) FROM {table}")
                     active_maxes.append(cur.fetchone()[0])
                 pg_pool.putconn(conn)
             except: pass
         if redis_client:
+            # Lepsze zabezpieczenie: szukamy ciągłości, a nie tylko losowego klucza
             loc = 0
             for offset in range(target_count - CHUNK_SIZE, -1, -CHUNK_SIZE):
-                if redis_client.exists(f"{table}:{offset + CHUNK_SIZE}"):
+                if redis_client.exists(f"{table}:{offset + 1}"):
                     loc = offset + CHUNK_SIZE
                     break
             active_maxes.append(loc)
         if mongo_client:
             try:
-                top = mongo_client['mydatabase'][table].find_one({}, sort=[("_id", -1)])
-                active_maxes.append(top['_id'] if top else 0)
+                active_maxes.append(mongo_client['mydatabase'][table].estimated_document_count())
             except: pass
 
         # Begin at the slowest database's last completed chunk, or 0
