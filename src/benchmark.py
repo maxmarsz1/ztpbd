@@ -15,6 +15,7 @@ def manage_indexes(pg_conn, my_conn, mongo_client, action="create"):
     pg_idx = [
         "CREATE INDEX idx_items_sellprice ON Items(sellPrice)",
         "CREATE INDEX idx_items_type ON Items(type)",
+        "CREATE INDEX idx_items_statsid ON Items(statsID)",
         "CREATE INDEX idx_stats_itemid ON Stats(itemID)",
         "CREATE INDEX idx_stats_damage ON Stats(((data->>'damage')::int))",
         "CREATE INDEX idx_npcs_typeid ON NPCs(typeID)"
@@ -22,6 +23,7 @@ def manage_indexes(pg_conn, my_conn, mongo_client, action="create"):
     my_idx = [
         "CREATE INDEX idx_items_sellprice ON Items(sellPrice)",
         "CREATE INDEX idx_items_type ON Items(type)",
+        "CREATE INDEX idx_items_statsid ON Items(statsID)",
         "CREATE INDEX idx_stats_itemid ON Stats(itemID)",
         "CREATE INDEX idx_stats_damage ON Stats((CAST(JSON_EXTRACT(data, '$.damage') AS UNSIGNED)))",
         "CREATE INDEX idx_npcs_typeid ON NPCs(typeID)"
@@ -61,6 +63,7 @@ def manage_indexes(pg_conn, my_conn, mongo_client, action="create"):
         if action == "create":
             db['Items'].create_index("sellPrice")
             db['Items'].create_index("type")
+            db['Items'].create_index("statsID")
             db['Stats'].create_index("itemID")
             db['Stats'].create_index("data.damage")
             db['NPCs'].create_index("typeID")
@@ -91,10 +94,10 @@ class Benchmark:
 
         start = time.time()
         try:
-            run_with_timeout(query_func, 20.0)
+            run_with_timeout(query_func, 120.0)
         except concurrent.futures.TimeoutError:
-            logging.warning(f"TIMEOUT: {db_name} query exceeded 20s.")
-            return 20.0, "TIMEOUT (EXPLAIN SKIPPED)"
+            logging.warning(f"TIMEOUT: {db_name} query exceeded 120s.")
+            return 120.0, "TIMEOUT (EXPLAIN SKIPPED)"
             
         t = time.time() - start
         
@@ -152,6 +155,12 @@ class Benchmark:
                         if expl: last_expl = expl
                     except Exception as e:
                         logging.warning(f"{s_name} {db} Error: {e}")
+                        if db == 'postgres':
+                            try: self.pg.rollback()
+                            except: pass
+                        elif db == 'mysql':
+                            try: self.my.rollback()
+                            except: pass
                         times.append(0.0)
                 
                 avg_time = sum(times) / max(1, len(times))
@@ -187,7 +196,11 @@ class Benchmark:
                     execute_values(c, "INSERT INTO Environments (id, name, description) VALUES %s ON CONFLICT DO NOTHING", data)
                 self.pg.commit()
             elif db == 'mysql':
-                with self.my.cursor() as c: c.executemany("REPLACE INTO Environments (id, name, description) VALUES (%s, %s, %s)", data)
+                with self.my.cursor() as c:
+                    # Optymalizacja: Ręczne zbudowanie jednego wielkiego zapytania zamiast pętli
+                    val_str = ", ".join(["(%s, %s, %s)"] * len(data))
+                    flat_data = [item for sublist in data for item in sublist]
+                    c.execute(f"REPLACE INTO Environments (id, name, description) VALUES {val_str}", flat_data)
                 self.my.commit()
             elif db == 'redis':
                 pl = self.redis.pipeline(transaction=False)
@@ -365,10 +378,10 @@ class Benchmark:
     def test_u2_update_math(self, db):
         lim = min(self.limits['max_id'], 1000)
         def q():
-            if db == 'postgres': c=self.pg.cursor(); c.execute(f"UPDATE Stats SET data = jsonb_set(data, '{{damage}}', ((data->>'damage')::int * 2)::text::jsonb) WHERE id < {lim}"); self.pg.commit()
-            elif db == 'mysql': c=self.my.cursor(); c.execute(f"UPDATE Stats SET data = JSON_SET(data, '$.damage', JSON_EXTRACT(data, '$.damage') * 2) WHERE id < {lim}"); self.my.commit()
+            if db == 'postgres': c=self.pg.cursor(); c.execute(f"UPDATE Stats SET data = jsonb_set(data, '{{damage}}', ((data->>'damage')::int + 1)::text::jsonb) WHERE id < {lim}"); self.pg.commit()
+            elif db == 'mysql': c=self.my.cursor(); c.execute(f"UPDATE Stats SET data = JSON_SET(data, '$.damage', JSON_EXTRACT(data, '$.damage') + 1) WHERE id < {lim}"); self.my.commit()
             elif db == 'redis': pass
-            elif db == 'mongo': self.mongo['Stats'].update_many({"_id": {"$lt": lim}}, {"$mul": {"data.damage": 2}})
+            elif db == 'mongo': self.mongo['Stats'].update_many({"_id": {"$lt": lim}}, {"$inc": {"data.damage": 1}})
         return self._measure(db, q)
 
     def test_u3_update_in(self, db):
@@ -490,14 +503,16 @@ def main():
     logging.info("PHASE 1: RUNNING TESTS WITHOUT INDEXES")
     logging.info("====================================")
     manage_indexes(pg_conn, my_conn, mongo_client, action="drop")
-    time.sleep(2)
+    logging.info("Waiting 10s for databases to flush caches and sync to disk...")
+    time.sleep(10)
     results_no_index = b.run_tests("NO_INDEX")
 
     logging.info("====================================")
     logging.info("PHASE 2: RUNNING TESTS WITH INDEXES")
     logging.info("====================================")
     manage_indexes(pg_conn, my_conn, mongo_client, action="create")
-    time.sleep(2)
+    logging.info("Waiting 10s for databases to flush caches and sync to disk...")
+    time.sleep(10)
     results_with_index = b.run_tests("WITH_INDEX")
 
     # Aggregate results

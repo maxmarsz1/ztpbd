@@ -88,7 +88,7 @@ def wait_for_mongo():
     retries = 150
     while retries > 0:
         try:
-            client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+            client = MongoClient(uri, serverSelectionTimeoutMS=2000, socketTimeoutMS=180000, connectTimeoutMS=180000)
             client.admin.command('ping')
             logging.info("Successfully connected to MongoDB")
             return client

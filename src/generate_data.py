@@ -28,7 +28,7 @@ PROFILES = {
         'CHUNK_SIZE': 20000
     },
     'duzy': {
-        'COUNT_MULTIPLIER': 10.0,
+        'COUNT_MULTIPLIER': 0.62,
         'CHUNK_SIZE': 50000
     }
 }
@@ -188,7 +188,9 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
             cur = conn.cursor()
             cur.execute("SET SESSION unique_checks = 0;")
             cur.execute("SET SESSION foreign_key_checks = 0;")
-            cur.executemany(my_sql.replace("INSERT INTO", "REPLACE INTO"), rows)
+            chunk_size = 10000
+            for i in range(0, len(rows), chunk_size):
+                cur.executemany(my_sql.replace("INSERT INTO", "REPLACE INTO"), rows[i:i+chunk_size])
             conn.commit()
             cur.close()
         except Exception as e:
@@ -202,7 +204,7 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
         try:
             conn = pg_pool.getconn()
             with conn.cursor() as cur:
-                psycopg2.extras.execute_values(cur, pg_sql + " ON CONFLICT (id) DO NOTHING", rows)
+                psycopg2.extras.execute_values(cur, pg_sql + " ON CONFLICT (id) DO NOTHING", rows, page_size=10000)
             conn.commit()
         except Exception as e:
             logging.error(f"Batch insert error Postgres on {table}: {e}")
@@ -219,7 +221,7 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
     if redis_client:
         try:
             pipe = redis_client.pipeline(transaction=False)
-            for d in mongo_dicts:
+            for idx, d in enumerate(mongo_dicts):
                 key = f"{table}:{d['id']}"
                 mapping = {}
                 for k, v in d.items():
@@ -228,7 +230,11 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
                     else:
                         mapping[k] = str(v)
                 pipe.hset(key, mapping=mapping)
-            pipe.execute()
+                if (idx + 1) % 10000 == 0:
+                    pipe.execute()
+                    pipe = redis_client.pipeline(transaction=False)
+            if len(mongo_dicts) % 10000 != 0:
+                pipe.execute()
         except Exception as e:
             logging.error(f"Batch insert error Redis on {table}: {e}")
 
@@ -240,9 +246,29 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
                 md = d.copy()
                 md['_id'] = md.pop('id')
                 m_dicts.append(md)
-            mongo_client['mydatabase'][table].insert_many(m_dicts, ordered=False)
-        except pymongo.errors.BulkWriteError:
-            pass # DO NOTHING equivalent for duplicate keys
+            
+            chunk_size = 2000
+            for i in range(0, len(m_dicts), chunk_size):
+                retries = 5
+                while retries > 0:
+                    try:
+                        mongo_client['mydatabase'][table].insert_many(
+                            m_dicts[i:i+chunk_size], 
+                            ordered=False, 
+                            bypass_document_validation=True
+                        )
+                        break
+                    except pymongo.errors.BulkWriteError:
+                        break # DO NOTHING equivalent for duplicate keys
+                    except Exception as e:
+                        if "connection closed" in str(e).lower() or "timeout" in str(e).lower() or "network" in str(e).lower():
+                            retries -= 1
+                            if retries == 0:
+                                logging.error(f"Batch insert error Mongo on {table}: {e}")
+                            time.sleep(2)
+                        else:
+                            logging.error(f"Batch insert error Mongo on {table}: {e}")
+                            break
         except Exception as e:
             logging.error(f"Batch insert error Mongo on {table}: {e}")
 
@@ -292,7 +318,7 @@ def run_sync(profile='maly'):
 
     try:
         mongo_uri = f"mongodb://{cfg['mongo']['user']}:{cfg['mongo']['password']}@{cfg['mongo']['host']}:{cfg['mongo']['port']}/"
-        mongo_client = MongoClient(mongo_uri, maxPoolSize=100)
+        mongo_client = MongoClient(mongo_uri, maxPoolSize=100, retryWrites=False, connectTimeoutMS=60000, socketTimeoutMS=60000)
         mongo_client.admin.command('ping')
         logging.info("[Unified Core] MongoDB connected.")
     except Exception as e:
@@ -340,7 +366,7 @@ def run_sync(profile='maly'):
             active_maxes.append(loc)
         if mongo_client:
             try:
-                active_maxes.append(mongo_client['mydatabase'][table].estimated_document_count())
+                active_maxes.append(mongo_client['mydatabase'][table].count_documents({}))
             except: pass
 
         # Begin at the slowest database's last completed chunk, or 0
@@ -357,13 +383,13 @@ def run_sync(profile='maly'):
         start_time = time.time()
         
         futures = []
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             for offset in range(global_start, target_count, CHUNK_SIZE):
                 end_val = min(offset + CHUNK_SIZE, target_count)
                 f = executor.submit(process_chunk_unified, my_pool, pg_pool, redis_client, mongo_client, table, offset, end_val, my_sql, pg_sql)
                 futures.append(f)
             
-            for f in tqdm.tqdm(as_completed(futures), total=len(futures), desc=f"Unified Ingestion {table} [Threads: 16]"):
+            for f in tqdm.tqdm(as_completed(futures), total=len(futures), desc=f"Unified Ingestion {table} [Threads: 8]"):
                 f.result() 
 
         logging.info(f"Finished {table} in {time.time() - start_time:.2f} seconds")
