@@ -16,14 +16,14 @@ def manage_indexes(pg_conn, my_conn, mongo_client, action="create"):
         "CREATE INDEX idx_items_sellprice ON Items(sellPrice)",
         "CREATE INDEX idx_items_type ON Items(type)",
         "CREATE INDEX idx_stats_itemid ON Stats(itemID)",
-        "CREATE INDEX idx_stats_damage ON Stats(damage)",
+        "CREATE INDEX idx_stats_damage ON Stats(((data->>'damage')::int))",
         "CREATE INDEX idx_npcs_typeid ON NPCs(typeID)"
     ]
     my_idx = [
         "CREATE INDEX idx_items_sellprice ON Items(sellPrice)",
         "CREATE INDEX idx_items_type ON Items(type)",
         "CREATE INDEX idx_stats_itemid ON Stats(itemID)",
-        "CREATE INDEX idx_stats_damage ON Stats(damage)",
+        "CREATE INDEX idx_stats_damage ON Stats((CAST(JSON_EXTRACT(data, '$.damage') AS UNSIGNED)))",
         "CREATE INDEX idx_npcs_typeid ON NPCs(typeID)"
     ]
     
@@ -62,7 +62,7 @@ def manage_indexes(pg_conn, my_conn, mongo_client, action="create"):
             db['Items'].create_index("sellPrice")
             db['Items'].create_index("type")
             db['Stats'].create_index("itemID")
-            db['Stats'].create_index("damage")
+            db['Stats'].create_index("data.damage")
             db['NPCs'].create_index("typeID")
         else:
             db['Items'].drop_indexes()
@@ -287,16 +287,15 @@ class Benchmark:
 
     def test_r3_read_filter_range(self, db):
         cap = self.limits['max_id']
-        sql = f"SELECT * FROM Stats WHERE itemID BETWEEN 5 AND {min(5000, cap)} AND damage > 5 LIMIT 500"
         def q():
-            if db == 'postgres': c=self.pg.cursor(); c.execute(sql); c.fetchall()
-            elif db == 'mysql': c=self.my.cursor(); c.execute(sql); c.fetchall()
+            if db == 'postgres': c=self.pg.cursor(); c.execute(f"SELECT * FROM Stats WHERE itemID BETWEEN 5 AND {min(5000, cap)} AND (data->>'damage')::int > 5 LIMIT 500"); c.fetchall()
+            elif db == 'mysql': c=self.my.cursor(); c.execute(f"SELECT * FROM Stats WHERE itemID BETWEEN 5 AND {min(5000, cap)} AND CAST(JSON_EXTRACT(data, '$.damage') AS UNSIGNED) > 5 LIMIT 500"); c.fetchall()
             elif db == 'redis': pass
-            elif db == 'mongo': list(self.mongo['Stats'].find({"itemID": {"$gte": 5, "$lte": min(5000, cap)}, "damage": {"$gt": 5}}).limit(500))
+            elif db == 'mongo': list(self.mongo['Stats'].find({"itemID": {"$gte": 5, "$lte": min(5000, cap)}, "data.damage": {"$gt": 5}}).limit(500))
         def ex():
-            if db == 'postgres': c=self.pg.cursor(); c.execute("EXPLAIN "+sql); return "\n".join(r[0] for r in c.fetchall())
-            elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute("EXPLAIN "+sql); return str(c.fetchall())
-            elif db == 'mongo': return str(self.mongo['Stats'].find({"itemID": {"$gte": 5, "$lte": min(5000, cap)}, "damage": {"$gt": 5}}).limit(500).explain())
+            if db == 'postgres': c=self.pg.cursor(); c.execute(f"EXPLAIN SELECT * FROM Stats WHERE itemID BETWEEN 5 AND {min(5000, cap)} AND (data->>'damage')::int > 5 LIMIT 500"); return "\n".join(r[0] for r in c.fetchall())
+            elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute(f"EXPLAIN SELECT * FROM Stats WHERE itemID BETWEEN 5 AND {min(5000, cap)} AND CAST(JSON_EXTRACT(data, '$.damage') AS UNSIGNED) > 5 LIMIT 500"); return str(c.fetchall())
+            elif db == 'mongo': return str(self.mongo['Stats'].find({"itemID": {"$gte": 5, "$lte": min(5000, cap)}, "data.damage": {"$gt": 5}}).limit(500).explain())
         return self._measure(db, q, ex)
 
     def test_r4_aggregate_count(self, db):
@@ -312,10 +311,9 @@ class Benchmark:
         return self._measure(db, q, ex)
 
     def test_r5_join_small(self, db):
-        sql = "SELECT i.name, s.damage FROM Items i JOIN Stats s ON i.statsID = s.id LIMIT 100"
         def q():
-            if db == 'postgres': c=self.pg.cursor(); c.execute(sql); c.fetchall()
-            elif db == 'mysql': c=self.my.cursor(); c.execute(sql); c.fetchall()
+            if db == 'postgres': c=self.pg.cursor(); c.execute("SELECT i.name, s.data->>'damage' FROM Items i JOIN Stats s ON i.statsID = s.id LIMIT 100"); c.fetchall()
+            elif db == 'mysql': c=self.my.cursor(); c.execute("SELECT i.name, JSON_EXTRACT(s.data, '$.damage') FROM Items i JOIN Stats s ON i.statsID = s.id LIMIT 100"); c.fetchall()
             elif db == 'redis': pass
             elif db == 'mongo':
                 list(self.mongo['Items'].aggregate([
@@ -323,8 +321,8 @@ class Benchmark:
                     {"$limit": 100}
                 ]))
         def ex():
-            if db == 'postgres': c=self.pg.cursor(); c.execute("EXPLAIN "+sql); return "\n".join(r[0] for r in c.fetchall())
-            elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute("EXPLAIN "+sql); return str(c.fetchall())
+            if db == 'postgres': c=self.pg.cursor(); c.execute("EXPLAIN SELECT i.name, s.data->>'damage' FROM Items i JOIN Stats s ON i.statsID = s.id LIMIT 100"); return "\n".join(r[0] for r in c.fetchall())
+            elif db == 'mysql': c=self.my.cursor(dictionary=True); c.execute("EXPLAIN SELECT i.name, JSON_EXTRACT(s.data, '$.damage') FROM Items i JOIN Stats s ON i.statsID = s.id LIMIT 100"); return str(c.fetchall())
         return self._measure(db, q, ex)
 
     def test_r6_complex_query(self, db):
@@ -367,10 +365,10 @@ class Benchmark:
     def test_u2_update_math(self, db):
         lim = min(self.limits['max_id'], 1000)
         def q():
-            if db == 'postgres': c=self.pg.cursor(); c.execute(f"UPDATE Stats SET damage = damage * 2 WHERE id < {lim}"); self.pg.commit()
-            elif db == 'mysql': c=self.my.cursor(); c.execute(f"UPDATE Stats SET damage = damage * 2 WHERE id < {lim}"); self.my.commit()
+            if db == 'postgres': c=self.pg.cursor(); c.execute(f"UPDATE Stats SET data = jsonb_set(data, '{{damage}}', ((data->>'damage')::int * 2)::text::jsonb) WHERE id < {lim}"); self.pg.commit()
+            elif db == 'mysql': c=self.my.cursor(); c.execute(f"UPDATE Stats SET data = JSON_SET(data, '$.damage', JSON_EXTRACT(data, '$.damage') * 2) WHERE id < {lim}"); self.my.commit()
             elif db == 'redis': pass
-            elif db == 'mongo': self.mongo['Stats'].update_many({"_id": {"$lt": lim}}, {"$mul": {"damage": 2}})
+            elif db == 'mongo': self.mongo['Stats'].update_many({"_id": {"$lt": lim}}, {"$mul": {"data.damage": 2}})
         return self._measure(db, q)
 
     def test_u3_update_in(self, db):
@@ -391,11 +389,11 @@ class Benchmark:
 
     def test_u5_update_subq(self, db):
         def q():
-            if db == 'postgres': c=self.pg.cursor(); c.execute("UPDATE Items SET sellPrice = 0 WHERE statsID IN (SELECT id FROM Stats WHERE damage < 5 LIMIT 10)"); self.pg.commit()
-            elif db == 'mysql': c=self.my.cursor(); c.execute("UPDATE Items INNER JOIN (SELECT id FROM Stats WHERE damage < 5 LIMIT 10) as s ON Items.statsID = s.id SET Items.sellPrice = 0"); self.my.commit()
+            if db == 'postgres': c=self.pg.cursor(); c.execute("UPDATE Items SET sellPrice = 0 WHERE statsID IN (SELECT id FROM Stats WHERE (data->>'damage')::int < 5 LIMIT 10)"); self.pg.commit()
+            elif db == 'mysql': c=self.my.cursor(); c.execute("UPDATE Items INNER JOIN (SELECT id FROM Stats WHERE CAST(JSON_EXTRACT(data, '$.damage') AS UNSIGNED) < 5 LIMIT 10) as s ON Items.statsID = s.id SET Items.sellPrice = 0"); self.my.commit()
             elif db == 'redis': pass
             elif db == 'mongo': 
-                low = [x['_id'] for x in self.mongo['Stats'].find({"damage": {"$lt": 5}}, {"_id": 1}).limit(10)]
+                low = [x['_id'] for x in self.mongo['Stats'].find({"data.damage": {"$lt": 5}}, {"_id": 1}).limit(10)]
                 if low: self.mongo['Items'].update_many({"statsID": {"$in": low}}, {"$set": {"sellPrice": 0}})
         return self._measure(db, q)
 

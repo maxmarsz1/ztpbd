@@ -78,16 +78,7 @@ def create_tables(pg_conn=None, mysql_conn=None):
         CREATE TABLE IF NOT EXISTS Stats (
             id SERIAL PRIMARY KEY,
             itemID INTEGER NOT NULL, -- Foreign key constraint added later
-            damage INTEGER,
-            knockback INTEGER,
-            criticalChance INTEGER,
-            useTime INTEGER,
-            mana INTEGER,
-            velocity INTEGER,
-            tooltip VARCHAR(100),
-            defense INTEGER,
-            setBonus VARCHAR(100),
-            bodySlot VARCHAR(50)
+            data JSONB
         )
         """,
         """
@@ -138,7 +129,7 @@ def create_tables(pg_conn=None, mysql_conn=None):
         """
     )
     
-    commands_mysql = [c.replace("SERIAL PRIMARY KEY", "INT AUTO_INCREMENT PRIMARY KEY").replace("TEXT", "LONGTEXT").replace("VARCHAR", "VARCHAR").replace("DECIMAL", "DECIMAL(10,4)").replace("BOOLEAN", "BOOLEAN") for c in commands_pg if not c.strip().startswith("DO $$")]
+    commands_mysql = [c.replace("SERIAL PRIMARY KEY", "INT AUTO_INCREMENT PRIMARY KEY").replace("TEXT", "LONGTEXT").replace("VARCHAR", "VARCHAR").replace("DECIMAL", "DECIMAL(10,4)").replace("BOOLEAN", "BOOLEAN").replace("JSONB", "JSON") for c in commands_pg if not c.strip().startswith("DO $$")]
     # Remove Postgres specific block
     
     # We will build constraints differently or just depend on the simple tables for MySQL.

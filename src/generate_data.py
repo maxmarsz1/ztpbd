@@ -3,6 +3,7 @@ import time
 import logging
 import random
 import argparse
+import json
 from faker import Faker
 import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -96,16 +97,28 @@ def _get_generator_for_table(table_name, start_id, end_id):
         elif table_name == 'NPCs':
             rows.append((i, i % 100))
         elif table_name == 'NPCEnvironments':
-            rows.append((i, (i % COUNTS['NPCs']) + 1, (i % 100) + 1))
+            rows.append((i, (i % COUNTS['NPCs']) + 1, (i % COUNTS['Environments']) + 1))
         elif table_name == 'EnemyVariants':
-            rows.append((i, (i % COUNTS['NPCs']) + 1, (i % 100) + 1, random.choice(["Enemy", "Critter", "TownNPC"]), random.choice(["classic", "expert", "master"])))
+            rows.append((i, (i % COUNTS['NPCs']) + 1, (i % COUNTS['AITypes']) + 1, random.choice(["Enemy", "Critter", "TownNPC"]), random.choice(["classic", "expert", "master"])))
         elif table_name == 'EnemyVariantStats':
             rows.append((i, (i % COUNTS['EnemyVariants']) + 1, random.randint(10, 5000), random.randint(5, 100), random.randint(0, 50), random.randint(0, 10000)))
         elif table_name == 'NPCSounds':
             rows.append((i, (i % COUNTS['NPCs']) + 1, random.choice(POOL_URLS) + f"{i}.wav"))
         elif table_name == 'Stats':
             item_id = (i % COUNTS['Items']) + 1
-            rows.append((i, item_id, random.randint(1, 100), random.randint(0, 10), random.randint(4, 100), random.randint(10, 60), random.randint(0, 50), random.randint(1, 15), random.choice(POOL_SENTS), random.randint(0, 20), random.choice(["None", "Stat Bonus", "Aura"]), random.choice(["Weapon", "Armor", "Accessory", "None"])))
+            data_dict = {
+                "damage": random.randint(1, 100),
+                "knockback": random.randint(0, 10),
+                "criticalChance": random.randint(4, 100),
+                "useTime": random.randint(10, 60),
+                "mana": random.randint(0, 50),
+                "velocity": random.randint(1, 15),
+                "tooltip": random.choice(POOL_SENTS),
+                "defense": random.randint(0, 20),
+                "setBonus": random.choice(["None", "Stat Bonus", "Aura"]),
+                "bodySlot": random.choice(["Weapon", "Armor", "Accessory", "None"])
+            }
+            rows.append((i, item_id, json.dumps(data_dict)))
         elif table_name == 'Items':
             stat_id = (i % COUNTS['Stats']) + 1
             rows.append((i, f"{random.choice(POOL_WORDS)} {random.choice(['Sword', 'Shield', 'Bow', 'Staff', 'Helmet', 'Ingot'])} {i}", random.choice(POOL_SENTS), random.choice(["Weapon", "Material", "Consumable", "Accessory"]), random.choice([True, False]), stat_id, random.randint(10, 50000)))
@@ -131,7 +144,7 @@ def get_insert_sql(table_name):
         'EnemyVariants': ("id, npcID, AITypeID, type, mode", 5),
         'EnemyVariantStats': ("id, variantID, health, damage, defense, coins", 6),
         'NPCSounds': ("id, npcID, url", 3),
-        'Stats': ("id, itemID, damage, knockback, criticalChance, useTime, mana, velocity, tooltip, defense, setBonus, bodySlot", 12),
+        'Stats': ("id, itemID, data", 3),
         'Items': ("id, name, description, type, material, statsID, sellPrice", 7),
         'itemsRecipies': ("id, itemID, craftingStation", 3),
         'recipies': ("id, itemRecipieID, itemID, amount", 4),
@@ -150,14 +163,20 @@ def get_mongo_dicts(table_name, rows):
         'EnemyVariants': ["id", "npcID", "AITypeID", "type", "mode"],
         'EnemyVariantStats': ["id", "variantID", "health", "damage", "defense", "coins"],
         'NPCSounds': ["id", "npcID", "url"],
-        'Stats': ["id", "itemID", "damage", "knockback", "criticalChance", "useTime", "mana", "velocity", "tooltip", "defense", "setBonus", "bodySlot"],
+        'Stats': ["id", "itemID", "data"],
         'Items': ["id", "name", "description", "type", "material", "statsID", "sellPrice"],
         'itemsRecipies': ["id", "itemID", "craftingStation"],
         'recipies': ["id", "itemRecipieID", "itemID", "amount"],
         'EnemyDrops': ["id", "variantID", "itemID", "rate"],
     }
     cols = columns_map[table_name]
-    return [dict(zip(cols, row)) for row in rows]
+    dicts = []
+    for row in rows:
+        d = dict(zip(cols, row))
+        if table_name == 'Stats' and 'data' in d and isinstance(d['data'], str):
+            d['data'] = json.loads(d['data'])
+        dicts.append(d)
+    return dicts
 
 def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, start_offset, end_val, my_sql, pg_sql):
     rows = _get_generator_for_table(table, start_offset + 1, end_val)
@@ -202,7 +221,13 @@ def process_chunk_unified(my_pool, pg_pool, redis_client, mongo_client, table, s
             pipe = redis_client.pipeline(transaction=False)
             for d in mongo_dicts:
                 key = f"{table}:{d['id']}"
-                pipe.hset(key, mapping={k: str(v) for k, v in d.items()})
+                mapping = {}
+                for k, v in d.items():
+                    if isinstance(v, dict):
+                        mapping[k] = json.dumps(v)
+                    else:
+                        mapping[k] = str(v)
+                pipe.hset(key, mapping=mapping)
             pipe.execute()
         except Exception as e:
             logging.error(f"Batch insert error Redis on {table}: {e}")
