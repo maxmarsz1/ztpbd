@@ -1,0 +1,154 @@
+\section{Wyniki testów wydajnościowych}
+
+\subsection{Analiza planów zapytań (EXPLAIN)}
+Analiza planów zapytań pozwala zrozumieć, w jaki sposób optymalizator w każdym z badanych silników bazy danych wykonuje kwerendy i jak dostępność indeksów wpływa na wybór ostatecznej ścieżki wykonania. Na podstawie logów z wynikami działania polecenia \texttt{EXPLAIN} dla baz PostgreSQL, MySQL oraz MongoDB (wygenerowanych dla zbiorów \textit{małego}, \textit{średniego} i \textit{dużego}) zaobserwowano następujące spójne i skalujące się w czasie wzorce:
+
+\begin{itemize}
+    \item \textbf{Złożone zapytania analityczne (Hash Join vs Aggregation Pipeline)}: W skomplikowanych zapytaniach wielotabelowych (np. \texttt{R6\_ComplexQuery}) PostgreSQL wykazuje potęgę swojego optymalizatora analitycznego. Pliki EXPLAIN wyraźnie pokazują wykorzystanie algorytmu \texttt{Hash Join} i \texttt{HashAggregate}. Zbudowanie w pamięci zoptymalizowanej struktury tablicy haszującej pozwoliło na błyskawiczne złączenia nawet na największych profilach danych (czasy rzędu 0.24s). Z kolei MongoDB, polegając na potoku agregacji (\texttt{Aggregation Pipeline}), musiało iterować, zagnieżdżać i "rozpakowywać" olbrzymie dokumenty BSON (operatory \texttt{\$lookup}), co prowadziło do wielosekundowych czasów odpowiedzi (nawet kilkanaście sekund w teście dużym). Używanie złączeń NoSQL przy tak masywnych relacjach jest antywzorcem wydajnościowym.
+    \item \textbf{Skutki pełnego skanowania i autogeneracja indeksów}: Według zrzutów logów z zapytań (np. \texttt{U5\_UpdateWithJoinSubq}) MongoDB w fazie bez jawnych indeksów wymusza \texttt{COLLSCAN} (Pełne skanowanie kolekcji), co wiąże się z podnoszeniem milionów ciężkich dokumentów BSON z dysku (czasy przekraczające 1.1s). PostgreSQL wykorzystywał \texttt{Sequential Scan}, co nadal było dużo szybsze z uwagi na lekką, bitową walidację (ok. 0.17s). Zaskoczeniem okazał się MySQL, w którym czas operacji był liczony w milisekundach już w pierwszej fazie — z uwagi na to, że jego silnik domyślnie generuje indeks B-Tree dla każdego zdefiniowanego klucza obcego (Foreign Key), omijając całkowicie skanowanie tabeli.
+    \item \textbf{Weryfikacja braku danych (D4\_DeleteSubquery)}: Przy zapytaniu odwołującym się do nieistniejącego rekordu (\texttt{typeID=999}), analizy EXPLAIN udowodniły, że bazy bez indeksów muszą brutalnie przeskanować pełne tabele od początku do końca, aby z całą pewnością potwierdzić brak pasujących wierszy (znaczne koszty dyskowe dla Mongo i MySQL). Po wdrożeniu indeksów silniki realizują zapytanie natychmiast, jedynie weryfikując liście w drzewie indeksu i przerywając przeszukiwanie w ułamki milisekund.
+\end{itemize}
+
+\subsection{Wydajność operacji CRUD i wpływ indeksacji}
+Testy wydajnościowe wykonano na trzech rozmiarach zbiorów danych (profil: mały, średni, duży). Wyniki zestawiono, dzieląc testy na 4 podstawowe typy operacji CRUD. Na wykresach zamieszczono zestawienie czasów wykonania zapytań zarówno przed założeniem indeksów jak i po zastosowaniu optymalizacji ("without indexes" oraz "with indexes").
+
+\subsubsection*{1. Operacje Create (Wstawianie danych)}
+W operacjach wstawiania bezsprzecznym faworytem okazał się \textbf{Redis}, operujący wyłącznie w pamięci operacyjnej. \textbf{MongoDB} radzi sobie znakomicie przy masowych zapisach dokumentów na dysk (odroczone zrzuty silnika WiredTiger). \textbf{PostgreSQL} wykazał się stabilnością dzięki zamianie instrukcji Bulk Insert w jedną paczkę sieciową TCP przez sterownik Pythona. \textbf{MySQL} wypadał gorzej przy wstawieniach masowych z powodu słabszej domyślnej implementacji sterownika.
+
+\textbf{Wpływ indeksacji:} W przypadku operacji Create, wdrożenie indeksów wpłynęło negatywnie na czasy wykonania we wszystkich bazach danych (z wyjątkiem Redisa, który ich nie uwzględnia). Każdy nowy wiersz wymuszał dodatkową operację wejścia/wyjścia (I/O) polegającą na przeliczeniu i rozbudowaniu struktury drzewa B-Tree. Szczególnie odczuwalne było zjawisko \textit{Cache Eviction} ("Brudnego Buforu") w \textbf{MongoDB} na dużym zbiorze – proces zrzutu potężnego nowoutworzonego indeksu z pamięci RAM do pamięci dyskowej zablokował w tle wydajność prostych wstawień, wielokrotnie podnosząc czas wykonania.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_maly/wykres_C.png}
+    \caption{Czasy operacji Create przed i po indeksacji - Zbiór Mały}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_sredni/wykres_C.png}
+    \caption{Czasy operacji Create przed i po indeksacji - Zbiór Średni}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_duzy/wykres_C.png}
+    \caption{Czasy operacji Create przed i po indeksacji - Zbiór Duży}
+\end{figure}
+
+\subsubsection*{2. Operacje Read (Odczyt danych)}
+W prostej identyfikacji rekordu \textbf{Redis} w ułamkach milisekund odnajduje klucz niezależnie od rozmiaru bazy. \textbf{PostgreSQL} błyszczy w bazowych analitycznych zapytaniach ze złączeniami wygrywając z \textbf{MySQL}, który wykazuje ogromne obciążenie z tytułu \texttt{Table scan}. Co najbardziej kluczowe, mechanizm odczytywania wielokolekcyjnego przez rurociąg agregacji w \textbf{MongoDB} jest ekstremalnie powolny i generuje wąskie gardło przy potężnych złączeniach relacyjnych zmuszając go do gigantycznych czasów na poziomie 14 sekund.
+
+\textbf{Wpływ indeksacji:} Analiza wykresów dowodzi radykalnej redukcji czasu przeszukiwania na skomplikowanych zapytaniach po użyciu jawnych kluczy na dużym wolumenie. Narzut skanowania całej tabeli (\texttt{Seq Scan} / \texttt{COLLSCAN}) został w wielu miejscach zastąpiony błyskawicznym weryfikowaniem liści drzewa indeksu (\texttt{Index Range Scan}), zamykając czasy w ułamkach milisekund dla selekcji zakresowych i precyzyjnych złączeń. Niemniej jednak warto zaznaczyć, że dla całkowicie potężnego łączenia (\texttt{R6\_ComplexQuery}) \textbf{PostgreSQL} udowodnił, że alokacja pełnej tablicy pamięciowej (\texttt{Hash Join}) w trakcie Sequential Scan bywa szybsza niż kosztowny Random I/O indeksu na wielu tysiącach wierszy, toteż indeks nie poprawił czasu tego konkretnego zapytania.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_maly/wykres_R.png}
+    \caption{Czasy operacji Read przed i po indeksacji - Zbiór Mały}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_sredni/wykres_R.png}
+    \caption{Czasy operacji Read przed i po indeksacji - Zbiór Średni}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_duzy/wykres_R.png}
+    \caption{Czasy operacji Read przed i po indeksacji - Zbiór Duży}
+\end{figure}
+
+\subsubsection*{3. Operacje Update (Aktualizacja danych)}
+Dla prostych aktualizacji dokumentów \textbf{Redis} i \textbf{MongoDB} wykazują podobną i bardzo wysoką sprawność omijając weryfikację relacji. Niespodziankę przyniósł natomiast \textbf{MySQL}, który w teście z podzapytaniami (\texttt{JOIN Subquery}) potrafił zachować czas wielokrotnie niższy w fazie \textit{bez indeksów} od \textbf{PostgreSQL}. Okazało się, że MySQL pod maską wygenerował niewidzialne autoincrementowane struktury indeksów wprost z relacji bazowych (\texttt{FOREIGN KEY}), omijając tym samym testowany wariant pełnego sekwencyjnego skanowania.
+
+\textbf{Wpływ indeksacji:} Tak jak w przypadku operacji wstawiania (C), modyfikowanie rekordów na zindeksowanych kolumnach pogorszyło znacząco wydajność Update u wszystkich zawodników narzucając obowiązek jednoczesnej aktualizacji głównego dyskowego drzewa. Zjawisko to jest naturalnym balansem wymian: spowolnione, dyskowe uderzenia mutujące są ceną, jaką bazy i serwery płacą za wysoce zoptymalizowane struktury gotowe do późniejszych, błyskawicznych odczytów na aplikacjach.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_maly/wykres_U.png}
+    \caption{Czasy operacji Update przed i po indeksacji - Zbiór Mały}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_sredni/wykres_U.png}
+    \caption{Czasy operacji Update przed i po indeksacji - Zbiór Średni}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_duzy/wykres_U.png}
+    \caption{Czasy operacji Update przed i po indeksacji - Zbiór Duży}
+\end{figure}
+
+\subsubsection*{4. Operacje Delete (Usuwanie danych)}
+Z racji swojej architektury pamięciowej, \textbf{Redis} wygrywa wyścig niszczenia danych. W bazach tradycyjnych, zapytanie o brakujący rekord (\texttt{D4\_DeleteSubquery}) w wariancie \textit{without index} poskutkowało drastycznym spadkiem wydajności u każdego silnika przez wymuszone skanowanie dysków aż do samego końca wielogigabajtowej tabeli. Ponadto test masowego czyszczenia (TRUNCATE) brutalnie obnażył narzuty na operacje strukturalne DDL w silniku InnoDB z bazy \textbf{MySQL} — wymagało to kilkudziesięciu milisekund na przeładowanie wbudowanego słownika plików \texttt{.ibd}, podczas gdy plikowy \textbf{PostgreSQL} czy \textbf{MongoDB} uwalniały wskaźniki w czasie $\sim 1$ ms.
+
+\textbf{Wpływ indeksacji:} Założenie jawnych indeksów błyskawicznie zniwelowało problem pustych skanów po błędnych identyfikatorach – system bazodanowy sięgał na drzewo węzłów (Index Scan) i błyskawicznie rezygnował z dalszych poszukiwań na twardym dysku widząc brak odpowiedniego klucza kandydującego. Mimo tego zaobserwowano potężne degradacje przy regularnych, zmasowanych procesach usuwania, ponieważ usunięcie każdego wiersza wymagało drogiego skanowania i rekurencyjnego odbudowywania/usuwania węzłów na drzewie B-Tree, generując nadmiar operacji serwerowych.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_maly/wykres_D.png}
+    \caption{Czasy operacji Delete przed i po indeksacji - Zbiór Mały}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_sredni/wykres_D.png}
+    \caption{Czasy operacji Delete przed i po indeksacji - Zbiór Średni}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{wykresy_duzy/wykres_D.png}
+    \caption{Czasy operacji Delete przed i po indeksacji - Zbiór Duży}
+\end{figure}
+
+\subsection{Heatmapy wydajności środowiska bazodanowego}
+Aby unaocznić ogromne dysproporcje pomiędzy poszczególnymi zapytaniami dla różnych konfiguracji, ostateczne zestawienie wsparto wygenerowanymi w Pythonie wielowymiarowymi heatmapami ze skalą logarytmiczną.
+
+Powyższe wizualizacje dobitnie uwydatniają przepaść wydajnościową w przypadku \textbf{MongoDB} dla potężnych relacyjnych zapytań grupujących \texttt{R6\_ComplexQuery} z widocznymi, "gorącymi" polami czasów. Kontrastuje to z bliskimi zeru, uspokajającymi "żółtymi" operacjami \textbf{Redis}. Heatmapa z nałożonymi indeksami pokazuje natomiast znaczne unormowanie procesów odczytowych w klasycznych relacyjnych bazach SQL przy zauważalnym ostudzeniu wydajności bloków odpowiedzialnych za aktualizacje stanu (Update/Insert).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{heatmap_without_indexes.png}
+    \caption{Zestawienie wydajności zapytań (w sekundach) dla wariantu bez indeksów na poszczególnych zbiorach}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{heatmap_with_indexes.png}
+    \caption{Zestawienie wydajności zapytań (w sekundach) po zaimplementowaniu docelowych indeksów optymalizacyjnych}
+\end{figure}
+
+\subsection{Testy współbieżności i skalowalności}
+Podczas symulacji obciążenia, można było wysunąć wnioski z architektury baz pod kątem elastyczności poziomej i pionowej. Nierelacyjne systemy (Redis) obsługują współbieżność bazując na jednowątkowej pętli zdarzeń asynchronicznych w RAM. MongoDB również świetnie minimalizuje zacięcia za pomocą mechanizmu blokad na poziomie pojedynczych dokumentów (\textit{Document-Level Locking}). Dodatkowo w zastosowaniach chmurowych MongoDB naturalnie skaluje się w poziomie (sharding), podnosząc wydajność.
+
+W tradycyjnych silnikach relacyjnych (PostgreSQL, MySQL) kluczowe jest utrzymywanie sztywnych reguł ACID i integralności referencyjnych. W środowisku ogromnej współbieżności zapisu, skutkuje to powstawaniem wysoce scentralizowanych blokad całych struktur pamięci (i powiązanych kluczy obcych), walką o zasoby zjawiskiem zwanym "\textit{Lock Contention}" lub systemowym wyczekiwaniem na prewencyjne niszczenie martwych ciągów transakcyjnych (\textit{deadlocków}). W rezultacie, o ile gwarantują absolutną spójność i bezpieczeństwo zapisu finansowego, mogą charakteryzować się gorszą skalowalnością uderzeń Update/Delete od rozwiązań NoSQL podczas zmasowanych i wysoce równoległych testów.
+
+
+
+
+
+
+
+\section{Analiza wyników i podsumowanie}
+
+\subsection{Weryfikacja hipotezy badawczej}
+Sformułowana na początku projektu hipoteza badawcza głosiła: \textit{H1: Zastosowanie indeksów znacząco poprawia wydajność operacji SELECT kosztem spadku wydajności operacji INSERT i UPDATE.}
+
+Dokładna analiza wyników benchmarku doprowadziła do \textbf{obalenia tej hipotezy} w kontekście badanego środowiska testowego. Wbrew powszechnym oczekiwaniom teoretycznym, pierwsza część hipotezy mówiąca o "znaczącej poprawie" dla operacji SELECT nie znalazła wyraźnego odzwierciedlenia w danych (szczególnie w mniejszych i średnich wariantach zbiorów). Porównanie czasów przed i po wdrożeniu indeksów wykazało różnice bliskie błędu statystycznego, a w wielu przypadkach prostych zapytań filtrujących - indeksy wygenerowały marginalne \textbf{spowolnienie} czasu odczytu. Wynika to z faktu, że wysoko zoptymalizowane, pełne skanowanie tabeli (\texttt{Seq Scan}) oraz łączenia oparte o pamięciowe tablice (\texttt{Hash Join}) narzucały mniejszy koszt dla silnika niż wieloetapowe przemierzanie i odczyt losowy (Random I/O) ze struktury drzewa B-Tree.
+
+Zgodnie z drugą częścią hipotezy, potwierdzono jedynie znaczny narzut kosztów przy zapisie. Dla operacji modyfikujących, takich jak Insert czy Update, czasy uległy odczuwalnemu pogorszeniu (np. dwukrotne zwolnienie wstawek w PostgreSQL). Każda zmiana stanu rekordu wymuszała zaktualizowanie ważącego wiele gigabajtów indeksu, co generowało obciążenie I/O. Efekt ten spotęgował się w środowisku MongoDB, gdzie zjawisko "Brudnego Buforu" (\textit{Cache Eviction}) paraliżowało na krótkie momenty przepustowość zapisu. Niemniej jednak, z racji braku gigantycznego zysku na zapytaniach odczytowych, hipoteza H1 w swoim ogólnym brzmieniu nie sprawdziła się.
+
+\subsection{Podsumowanie i wnioski końcowe}
+Przeprowadzony benchmark 4 skrajnie odmiennych silników w środowisku 10 milionów wierszy obnażył ich silne i słabe strony, pozwalając na wyciągnięcie końcowych rekomendacji projektowych:
+
+\begin{itemize}
+    \item \textbf{PostgreSQL} - Sprawdził się jako absolutny lider w zbalansowanej, analitycznej i strukturalnej architekturze. Fantastyczny optymalizator operacji \texttt{JOIN} oparty o \texttt{HashAggregate} i minimalny narzut dyskowy dla złożonych selekcji sprawiają, że to najlepszy wybór dla potężnych biznesowych rozwiązań (np. gier wideo z zaawansowaną ekonomią) wymagających wielotabelowej analizy przy restrykcyjnym modelu danych ACID.
+    \item \textbf{MySQL} - Podobnie jak PostgreSQL, jest to solidna baza relacyjna, wyróżniająca się m.in. auto-generowaniem indeksów B-Tree dla kluczy obcych (co chroni nieuważnych projektantów przed pełnym skanowaniem tabeli). Wykazała natomiast dużo gorszą architekturę wewnętrznych plików słownikowych podczas destrukcyjnych operacji na schemacie (np. potężne spowolnienie przy \texttt{TRUNCATE}) oraz uboższy proces łączenia tabel analitycznych niż Postgres. Doskonały wybór do stabilnych stron i aplikacji webowych.
+    \item \textbf{MongoDB} - Zdeklasowała konkurencję w wydajności operacji masowych. Mimo braku schematu, wymusza niesamowitą dyscyplinę na architekcie systemu - przenoszenie relacyjnych nawyków i wymuszanie powiązań kluczami i \texttt{JOIN}ami to najszybsza droga do katastrofy wydajnościowej. Sprawdzi się wyśmienicie jako baza dla logów serwerowych czy platformy e-commerce ze zdenormalizowanymi, płaskimi modelami produktów.
+    \item \textbf{Redis} - Pokazał brutalną różnicę pomiędzy operacjami w pamięci RAM a standardowym dyskiem serwerowym. Większość odczytów kończyła się w nieuchwytnych ułamkach milisekund bez znaczenia dla wielkości bazy. To jedyna poprawna odpowiedź dla cache'owania rozproszonych aplikacji, autoryzacji sesyjnych i szybkiej wymiany stanów mikroserwisów, jednak ze względu na brak relacyjnej integracji i schematów, powinien stanowić warstwę wspomagającą, a nie jedyne źródło prawdy w architekturze.
+\end{itemize}
+
+Ostatecznym wnioskiem płynącym z projektu jest fakt, że \textbf{nie ma systemów bazodanowych idealnych}. Zjawiska takie jak ukryty narzut sieciowy sterownika (np. opóźnienia masowych insertów w bibliotekach Pythona), Cache Eviction (spowolnienia we/wy po operacjach tworzenia indeksów w Mongo) czy pełne skanowanie kolekcji przy zapytaniach o nieistniejące identyfikatory udowadniają, że optymalna infrastruktura IT zaczyna się przede wszystkim od gruntownego zrozumienia sposobu działania i docelowego przeznaczenia konkretnej architektury bazodanowej.
